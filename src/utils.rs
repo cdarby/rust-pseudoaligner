@@ -169,7 +169,7 @@ pub fn write_mappability_tsv<P: AsRef<Path>>(
 
     let mut outfile = open_file("tx_mappability.tsv", outdir)?;
 
-    outfile.write(MAPPABILITY_HEADER_STRING.as_bytes())?;
+    outfile.write_all(MAPPABILITY_HEADER_STRING.as_bytes())?;
 
     for record in records {
         write!(outfile,
@@ -184,4 +184,8 @@ pub fn write_mappability_tsv<P: AsRef<Path>>(
     }
 
     Ok(())
+}
+
+pub fn hla_consensus(hla_weights: String) -> Result<(String,String), Error> {
+    Ok(("".to_string(),"".to_string()))
 }

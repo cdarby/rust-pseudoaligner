@@ -15,9 +15,6 @@ extern crate rust_htslib;
 extern crate smallvec;
 extern crate shardio;
 
-#[macro_use] 
-extern crate pretty_assertions;
-
 #[macro_use]
 extern crate lazy_static;
 
@@ -35,5 +32,5 @@ pub mod mappability;
 pub mod pseudoaligner;
 pub mod hla;
 pub mod utils;
-mod locus;
+pub mod locus;
 

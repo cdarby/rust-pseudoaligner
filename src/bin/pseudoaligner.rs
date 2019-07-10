@@ -8,6 +8,7 @@ extern crate docopt;
 extern crate failure;
 extern crate pretty_env_logger;
 extern crate rayon;
+extern crate csv;
 
 #[macro_use]
 extern crate log;
@@ -16,7 +17,7 @@ extern crate log;
 extern crate serde;
 
 // Import some modules
-use std::collections::HashMap;
+use std::collections::{HashMap,HashSet};
 use bio::io::{fasta, fastq};
 use docopt::Docopt;
 use failure::Error;
@@ -86,8 +87,9 @@ struct Args {
     flag_v: bool,
 }
 
-const HLA_PATTERN: &'static str = "^HLA-.*";
+const HLA_PATTERN: &str = "^HLA-.*";
 
+#[allow(clippy::cognitive_complexity)]
 fn main() -> Result<(), Error> {
     let args: Args = Docopt::new(USAGE)
                             .and_then(|d| d.deserialize())
@@ -124,7 +126,7 @@ fn main() -> Result<(), Error> {
 
         info!("Building index from fasta");
         let fasta = fasta::Reader::from_file(args.arg_hla_fasta)?;
-        let (seqs, tx_names, tx_allele_map) = hla::read_hla_cds(fasta)?;
+        let (seqs, tx_names, tx_allele_map) = hla::read_hla_cds(fasta, HashSet::new())?;
 
         let tx_gene_map = HashMap::new();
 
@@ -146,7 +148,7 @@ fn main() -> Result<(), Error> {
 
         info!("Building index from fasta");
         let fasta = fasta::Reader::from_file(args.arg_hla_fasta)?;
-        let (hla_seqs, hla_tx_names, hla_tx_allele_map) = hla::read_hla_cds(fasta)?;
+        let (hla_seqs, hla_tx_names, hla_tx_allele_map) = hla::read_hla_cds(fasta, HashSet::new())?;
         let tx_gene_map = HashMap::new();
 
         // WIP!!
@@ -168,7 +170,15 @@ fn main() -> Result<(), Error> {
         let reads = fastq::Reader::from_file(args.arg_reads_fastq)?;
         process_reads::<config::KmerType, _>(reads, &index, outdir)?;
     } else if args.cmd_map_bam {
-        map_bam(&args.clone())?;
+        info!("Reading index from disk");
+        let index = utils::read_obj(&args.arg_index)?;
+        info!("Finished reading index!");
+  
+        info!("Mapping reads from BAM");
+    
+        let path = PathBuf::from(args.flag_outdir.as_ref().unwrap());
+        //let p2: PathBuf = args.flag_outdir.as_ref().unwrap().into();
+        bam::map_bam(&args.arg_bam, index, &args.arg_locus, &path)?;;
     } else if args.cmd_mappability {
         info!("Reading index from disk");
         let index = debruijn_mapping::utils::read_obj(args.arg_index)?;
@@ -275,21 +285,5 @@ fn main() -> Result<(), Error> {
     }
 
     info!("Done!");
-    Ok(())
-}
-
-
-fn map_bam(args: &Args) -> Result<(), Error> {
-
-    info!("Reading index from disk");
-    let index = utils::read_obj(&args.arg_index)?;
-    info!("Finished reading index!");
-
-    info!("Mapping reads from BAM");
-
-    let path = PathBuf::from(args.flag_outdir.as_ref().unwrap());
-    //let p2: PathBuf = args.flag_outdir.as_ref().unwrap().into();
-    bam::map_bam(&args.arg_bam, index, &args.arg_locus, &path)?;
-
     Ok(())
 }

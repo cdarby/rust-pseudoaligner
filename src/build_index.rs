@@ -1,7 +1,7 @@
 // Copyright (c) 2018 10x Genomics, Inc. All rights reserved.
 
 use std::sync::Arc;
-use std::collections::HashMap;
+use std::collections::{HashMap,HashSet};
 
 use boomphf::hashmap::{BoomHashMap2, NoKeyBoomHashMap};
 use config::{KmerType, MEM_SIZE, REPORT_ALL_KMER, STRANDED};
@@ -18,6 +18,11 @@ use config::{MAX_WORKER, MIN_KMERS, U32_MAX};
 use pseudoaligner::Pseudoaligner;
 use rayon;
 use rayon::prelude::*;
+use bio::io::fasta;
+use std::fs::File;
+
+use crate::hla::read_hla_cds;
+use crate::{config, utils};
 
 const MIN_SHARD_SEQUENCES: usize = 2000;
 
@@ -37,7 +42,8 @@ pub fn build_index<K: Kmer + Sync + Send>(
 
     println!("Sharding sequences...");
 
-    let mut buckets: Vec<_> = seqs.iter()
+    let mut buckets: Vec<_> = seqs
+        .into_par_iter()
         .enumerate()
         .flat_map(|(id, seq)| partition_contigs::<KmerType>(seq, id as u32))
         .collect();
@@ -71,49 +77,9 @@ pub fn build_index<K: Kmer + Sync + Send>(
 
     println!("Indexing de Bruijn graph");
     let dbg_index = make_dbg_index(&dbg);
-
-    let al = Pseudoaligner::new(
+    Ok(Pseudoaligner::new(
         dbg, eq_classes, dbg_index, tx_names.clone(), tx_gene_map.clone()
-    );
-
-    validate_dbg(seqs, &al);
-
-    Ok(al)
-}
-
-
-fn validate_dbg<K: Kmer + Sync + Send>(seqs: &[DnaString], al: &Pseudoaligner<K>) {
-
-    let mut eqclasses = HashMap::<K, Vec<u32>>::new();
-
-    for (i, s) in seqs.iter().enumerate() {
-        for k in s.iter_kmers::<K>() {
-            let eq = eqclasses.entry(k).or_insert(vec![]);
-            eq.push(i as u32)
-        }
-    }
-
-    for (k, mut test_eqclass) in eqclasses {
-        test_eqclass.dedup();
-
-        if test_eqclass.len() > 5000 {
-            println!("kmer: {:?}, eqclass.len(): {}", k, test_eqclass.len());
-        }
-
-        let (node_id, _) = al.dbg_index.get(&k).unwrap();
-
-        let eq_class = al.dbg.get_node(*node_id as usize).data();
-        let dbg_eqclass = &al.eq_classes[*eq_class as usize];
-
-        let mut dbg_eq_clone = dbg_eqclass.clone();
-        dbg_eq_clone.dedup();
-
-        if &dbg_eq_clone != dbg_eqclass {
-            println!("dbg eq class not unique: eqclass_id: {}, node: {}", eq_class, node_id);
-        }
-
-        assert_eq!(&test_eqclass, dbg_eqclass);
-    }
+    ))
 }
 
 type PmerType = debruijn::kmer::Kmer6;
@@ -230,4 +196,33 @@ fn group_by_slices<T, K: PartialEq, F: Fn(&T) -> K>(
         result.push(&data[slice_start..]);
     }
     result
+}
+
+pub fn hla_index(hla_fasta: String, hla_index: String, allele_status: String) -> Result<String, Error> {
+    info!("Building index from fasta");
+    let mut allele_set = HashSet::new();
+    let mut rdr = csv::ReaderBuilder::new()
+                        .comment(Some(b'#'))
+                        .from_path(allele_status)?;
+    for result in rdr.records() {
+        let record = result?;
+        let partial: String = record[6].parse()?;
+        let dna: String = record[7].parse()?;
+        if partial == "Full" && dna == "gDNA" {
+            let name: String = record[0].parse()?;
+            allele_set.insert(name);
+        }
+    }
+    info!("Found {} \"Full\" + \"gDNA\" alleles in allele status file", allele_set.len());
+    let fasta = fasta::Reader::from_file(hla_fasta)?;
+    let (seqs, tx_names, tx_allele_map) = read_hla_cds(fasta, allele_set)?;
+    let tx_gene_map = HashMap::new();
+    let index = build_index::<config::KmerType>(
+        &seqs, &tx_names, &tx_gene_map
+    )?;
+    info!("Finished building index!");
+    info!("Writing index to disk");
+    utils::write_obj(&(index, tx_allele_map), hla_index.clone())?;
+    info!("Finished writing index!");
+    Ok(hla_index)
 }
