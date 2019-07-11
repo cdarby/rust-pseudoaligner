@@ -8,9 +8,10 @@ use serde::{Serialize};
 use bio::io::fasta;
 use debruijn::dna_string::DnaString;
 use itertools::Itertools;
-
+use std::fmt;
 use regex::Regex;
 use std::str::FromStr;
+use std::string::String;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Allele {
@@ -19,6 +20,13 @@ pub struct Allele {
     pub f2: Option<u16>,
     pub f3: Option<u16>,
     pub f4: Option<u16>,
+    pub name : Vec<u8>,
+}
+
+impl fmt::Display for Allele {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", String::from_utf8(self.name.clone()).unwrap())
+    }
 }
 
 pub struct AlleleDb {
@@ -91,7 +99,8 @@ impl AlleleParser {
         
         Ok(Allele {
             gene: gene.as_bytes().to_vec(),
-            f1, f2, f3, f4
+            f1, f2, f3, f4,
+            name: s.as_bytes().to_vec(),
         })
     }
 }
@@ -119,15 +128,13 @@ pub fn read_hla_cds(
         let record = result?;
 
         // Sequence
-        let dna_string = DnaString::from_acgt_bytes_hashn(record.seq(), record.id().as_bytes());
-
+        //let dna_string = DnaString::from_acgt_bytes_hashn(record.seq(), record.id().as_bytes());
+        let dna_string = DnaString::from_acgt_bytes(record.seq());
         let allele_str = record.desc().ok_or_else(|| format_err!("no HLA allele"))?;
         let allele_str = allele_str.split(' ').next().ok_or_else(||format_err!("no HLA allele"))?;
         if !allele_set.contains(&allele_str.to_string()) { continue; }
         let allele = allele_parser.parse(allele_str)?;
-
         let tx_id = record.id().to_string();
-
         let data = (allele, tx_id, allele_str.to_string(), dna_string);
         hlas.push(data);
     }
@@ -171,6 +178,8 @@ pub fn read_hla_cds(
         //println!("td: {:?}, alleles: {:?}, max_len: {}, req_len: {}", three_digit, nalleles, mylen, req_len);
 
         if mylen >= req_len {
+            //the CDS only has three-digit resolution so having more than that in allele_str is misleading
+            //when that's reported as the HLA type
             seqs.push(dna_string.clone());
             tx_ids.push(allele_str.to_string());
             tx_to_allele_map.insert(tx_id.to_string(), allele.clone());

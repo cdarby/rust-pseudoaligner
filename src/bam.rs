@@ -157,6 +157,7 @@ impl<'a> EqClassDb {
     pub fn eq_class_counts(&mut self, nitems: usize) -> crate::em::EqClassCounts {
         let mut rev_map = HashMap::<u32, &EqClass>::new();
         let mut counts: HashMap<EqClass, u32> = HashMap::new();
+        let mut counts_reads: HashMap<EqClass, u32> = HashMap::new();
 
         self.sort();
 
@@ -195,13 +196,69 @@ impl<'a> EqClassDb {
 
         crate::em::EqClassCounts {
             nitems,
-            counts,
-            counts_reads : HashMap::new(),
+            counts_umi : counts,
+            counts_reads,
             nreads: total_reads,
         }
     }
+    
+    pub fn eq_class_counts_updated(&mut self, nitems: usize) -> (crate::em::EqClassCounts, Vec<usize>) {
+        let mut rev_map = HashMap::<u32, &EqClass>::new();
+        let mut counts_reads: HashMap<EqClass, u32> = HashMap::new();
+        let mut counts_umi: HashMap<EqClass, u32> = HashMap::new();
+        let mut reads_explained = vec![0; nitems];
+        self.sort();
+
+        for (cls, id) in &self.eq_classes {
+            rev_map.insert(*id, cls);
+        }
+
+        let mut uniq = 0;
+        let mut total_reads = 0;
+        let mut buf = Vec::new();
+        
+        use itertools::Itertools;
+        for ((_bc, _umi), mut hits) in &self.counts.iter().group_by(|c| (c.barcode_id, c.umi_id)) {
+            buf.clear();
+            let mut flag : bool = false;
+            for c in hits {
+                if rev_map.contains_key(&c.eq_class_id) {
+                    if flag { intersect(&mut buf, rev_map[&c.eq_class_id].as_ref()); }
+                    else { buf.extend(rev_map[&c.eq_class_id].as_ref()); flag = true; }
+                    total_reads += 1;
+                    for t in rev_map[&c.eq_class_id].as_ref() {
+                        reads_explained[*t as usize] += 1;
+                    }
+                    let eqclass = EqClass::from_slice(rev_map[&c.eq_class_id].as_ref());
+                    let count = counts_reads.entry(eqclass).or_default();
+                    *count += 1;
+                }
+            }
+            if flag {
+                buf.sort();
+                buf.dedup();
+                let eqclass = EqClass::from_slice(&buf);
+                let count = counts_umi.entry(eqclass).or_default();
+                *count += 1;
+                uniq += 1;
+            }
+        }
+
+        debug!("mean reads per UMI: {}", f64::from(total_reads) / f64::from(uniq));
+
+        //let empty = EqClass::new();
+        //println!("empty eq_class counts: {:?} of {}", counts.get(&empty), self.counts.len());
+
+        (crate::em::EqClassCounts {
+            nitems,
+            counts_reads,
+            counts_umi,
+            nreads: total_reads,
+        }, reads_explained)
+    }
+    
     // Takes only reads aligning to the subset of the equivalence classes as indicated in the vector included_eq_classes
-    pub fn eq_class_counts_from_vec(&mut self, included_eqs: &Vec<u32>, eq_classes: &Vec<Vec<u32>>) -> Option<(crate::em::EqClassCounts, Vec<u32>, Vec<usize>)> {
+    /*pub fn eq_class_counts_from_vec(&mut self, included_eqs: &Vec<u32>, eq_classes: &Vec<Vec<u32>>) -> Option<(crate::em::EqClassCounts, Vec<u32>, Vec<usize>)> {
         let mut rev_map = HashMap::<u32, EqClass>::new();
         let mut counts_reads: HashMap<EqClass, u32> = HashMap::new();
         let mut counts_umi: HashMap<EqClass, u32> = HashMap::new();
@@ -273,7 +330,7 @@ impl<'a> EqClassDb {
             counts_reads,
             nreads : total_reads,
         }, tx_order, reads_explained))
-    }
+    }*/
 }
 
 
@@ -319,12 +376,12 @@ impl Iterator for BamSeqReader {
 
 
             // Get original read sequence from record.
-            let mut sequence = DnaString::from_acgt_bytes_hashn(&self.tmp_record.seq().as_bytes(), self.tmp_record.qname());
-
+            //let mut sequence = DnaString::from_acgt_bytes_hashn(&self.tmp_record.seq().as_bytes(), self.tmp_record.qname());
+            let mut sequence = DnaString::from_acgt_bytes(&self.tmp_record.seq().as_bytes());
             if !self.tmp_record.is_reverse() {
                 sequence = sequence.reverse();
             }
-
+            //println!("{:?}",sequence);
             let barcode = match self.tmp_record.aux(PROC_BC_SEQ_TAG).map(|x| Barcode::from_slice(x.string())) {
                 Some(bc) => bc,
                 None => continue,
@@ -379,8 +436,7 @@ pub fn map_bam(bam: impl AsRef<Path>, align: Pseudoaligner<KmerType>, locus_stri
             some_aln += 1;
             
             align.nodes_to_eq_class(&nodes, &mut eq_class);
-
-            if cov > 50 {
+            if cov > 40 {
                 long_aln += 1;
 
                 eq_counts.count(&rec.key.barcode, &rec.key.umi, &EqClass::from_slice(&eq_class));

@@ -8,7 +8,7 @@ bincode = "1.0"
 bio = "0.25"
 crossbeam = "0.7"
 csv = "1.1"
-debruijn = { git = "https://github.com/10XGenomics/rust-debruijn", branch = "pmarks/test-mphf" }
+debruijn = { git = "https://github.com/10XGenomics/rust-debruijn"}
 docopt = "1.0"
 failure = "0.1"
 flate2 = "1.0"
@@ -28,7 +28,7 @@ branch = "master"
 [dependencies.boomphf]
 git = "https://github.com/10XGenomics/rust-boomphf"
 branch = "master"
-version = "0.4"
+version = "0.5.2"
 features = ["serde"]
 
 [dependencies.smallvec]

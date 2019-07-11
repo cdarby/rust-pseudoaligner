@@ -127,7 +127,7 @@ fn assemble_shard<K: Kmer>(
         .map(|(_, seqid, string, exts)| (string, exts, seqid))
         .collect();
 
-    let (phf, _): (BoomHashMap2<K, Exts, EqClassIdType>, _) = filter_kmers(
+    let (phf, _) = filter_kmers(
         &filter_input,
         summarizer,
         STRANDED,
@@ -135,14 +135,14 @@ fn assemble_shard<K: Kmer>(
         MEM_SIZE,
     );
 
-    compress_kmers_with_hash(STRANDED, ScmapCompress::new(), &phf)
+    compress_kmers_with_hash(STRANDED, &ScmapCompress::new(), &phf)
 }
 
 fn merge_shard_dbgs<K: Kmer + Sync + Send>(
     uncompressed_dbgs: Vec<BaseGraph<K, EqClassIdType>>,
 ) -> DebruijnGraph<K, EqClassIdType> {
     let combined_graph = BaseGraph::combine(uncompressed_dbgs.into_iter()).finish();
-    compress_graph(STRANDED, ScmapCompress::new(), combined_graph, None)
+    compress_graph(STRANDED, &ScmapCompress::new(), combined_graph, None)
 }
 
 #[inline(never)]
@@ -192,7 +192,7 @@ fn group_by_slices<T, K: PartialEq, F: Fn(&T) -> K>(
             slice_start = i;
         }
     }
-    if slice_start > 0 {
+    if slice_start > 0 || data.len() <= min_size {
         result.push(&data[slice_start..]);
     }
     result

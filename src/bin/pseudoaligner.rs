@@ -228,7 +228,7 @@ fn main() -> Result<(), Error> {
                 // Find the tx's that overlap most strongly with this tx
                 let mut tx_counts: HashMap<u32, u32> = HashMap::new();
 
-                for (class, count) in &eqclass_counts.counts {
+                for (class, count) in &eqclass_counts.counts_umi {
                     if class.binary_search(&txid).is_ok() {
                         for tx in class {
                             let c = tx_counts.entry(*tx).or_insert(0);
@@ -271,14 +271,12 @@ fn main() -> Result<(), Error> {
             let id = name_map.get(&s).expect("couldn't find gene").clone() as u32;
 
             println!("===== {} =====", s);
-            for (class, count) in &eqclass_counts.counts {
-                if count > &10 {
-                    if class.binary_search(&id).is_ok() {
-                        for tx in class {
-                            println!("g: {}", index.tx_names[*tx as usize]);
-                        }
-                        println!("count: {}", count);
+            for (class, count) in &eqclass_counts.counts_umi {
+                if count > &10 && class.binary_search(&id).is_ok() {
+                    for tx in class {
+                        println!("g: {}", index.tx_names[*tx as usize]);
                     }
+                    println!("count: {}", count);
                 }
             }
         }

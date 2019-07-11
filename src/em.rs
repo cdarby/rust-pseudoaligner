@@ -1,14 +1,16 @@
 use std::collections::{HashMap,HashSet};
 use bam::EqClass;
-
+use std::fs::File;
+use std::io::{Write,BufWriter};
 use failure::Error;
+use itertools::Itertools;
 use crate::{utils, bam, config, pseudoaligner};
 
 #[derive(Default)]
 pub struct EqClassCounts {
     pub nitems: usize,
-    pub counts: HashMap<EqClass, u32>,
     pub counts_reads: HashMap<EqClass, u32>,
+    pub counts_umi: HashMap<EqClass, u32>,
     pub nreads: u32,
 }
 
@@ -16,8 +18,8 @@ impl EqClassCounts {
     pub fn new() -> EqClassCounts {
         EqClassCounts {
             nitems: 0,
-            counts: HashMap::new(),
             counts_reads: HashMap::new(),
+            counts_umi: HashMap::new(),
             nreads: 0,
         }
     }
@@ -66,7 +68,7 @@ impl EmProblem for EqClassCounts {
             theta2[i] = 0.0;
         }
 
-        for (class, count) in &self.counts {
+        for (class, count) in &self.counts_umi {
 
             let mut norm = 0.0;
             for tx in class {
@@ -105,7 +107,7 @@ impl EmProblem for EqClassCounts {
     fn L(&self, theta: &[f64]) -> f64 {
         let mut ll = 0.0;
 
-        for (class, count) in &self.counts {
+        for (class, count) in &self.counts_umi {
 
             // Exclude empty equivalence classes
             if class.is_empty() {
@@ -140,7 +142,7 @@ pub fn em(eqclasses: &EqClassCounts) -> Vec<f64> {
         let mut pseudocounts = vec![0.0; nitems];
         let mut total_counts = 0.0;
 
-        for (class, count) in &eqclasses.counts {
+        for (class, count) in &eqclasses.counts_umi {
 
             let mut norm = 0.0;
             for tx in class {
@@ -330,119 +332,66 @@ fn diffs(t1: &[f64], t2: &[f64], rel_thresh: Option<f64>) -> (f64, f64) {
     (max_rel_diff, max_abs_diff)
 }
 
+#[allow(clippy::cognitive_complexity)]
 pub fn hla_em(hla_index: String, hla_counts: String, cds_db: String, gen_db: String) -> Result<(&'static str,&'static str), Error> {
     let index: pseudoaligner::Pseudoaligner<config::KmerType> = utils::read_obj(&hla_index)?;
     let mut eq_counts: bam::EqClassDb = utils::read_obj(&hla_counts)?;
-    let mut genes_to_eq_classes : HashMap<&str,Vec<u32>> = HashMap::new();
-    let mut single_gene_eq_classes : Vec<usize> = Vec::new();
     
-    use std::fs::File;
-    use std::io::BufWriter;
-    use std::io::Write;
     let mut weights_file = BufWriter::new(File::create("weights.tsv")?);
     let mut pairs_file = BufWriter::new(File::create("pairs.tsv")?);
     let mut alleles_called: HashSet<String> = HashSet::new();
     
-    // identify eq classes that have all transcripts from the same gene
-    for (i, tx_ids) in index.eq_classes.clone().iter().enumerate() {
-        let mut gene_names : HashSet<&str> = HashSet::new();
-        for t in tx_ids {
-            let s = &index.tx_names[*t as usize];
-            let mut star_split = s.split('*');
-            let gene = star_split.next().ok_or_else(|| format_err!("no split: {}", s))?;
-            gene_names.insert(gene);
-        }
-        if gene_names.len() == 1 { 
-            single_gene_eq_classes.push(i); 
-            for g in gene_names.iter() {
-                let c = genes_to_eq_classes.entry(g).or_insert_with(Vec::new);
-                c.push(i as u32);
-            }
-        }
-    }
+    let (eq_class_counts, reads_explained) = eq_counts.eq_class_counts_updated(index.tx_names.len());
+    let weights = squarem(&eq_class_counts);
+    let weight_names : Vec<(usize, f64, &String, usize)> = 
+            weights.
+            into_iter().
+            enumerate().
+            map(|(i,w)| (i, w, &index.tx_names[i], reads_explained[i])).
+            collect();
+    let mut weight_names : Vec<(u32, f64, &String, &str, usize)> = 
+            weight_names.
+            into_iter().
+            map(|(i,w,n,e)| (i as u32, w, n, n.split('*').next().unwrap(), e)).
+            collect();
+    weight_names.sort_by(|(_, wa,_, _, _), (_, wb, _, _, _)| (-wa).partial_cmp(&-wb).unwrap()); //sort by descending weight
+    weight_names.sort_by_key(|x| x.3); //sort by gene name, stable wrt weight
     
-    // count the number of transcripts for each gene
-    let mut gene_tx_counts : HashMap<&str,Vec<&str>> = HashMap::new();
-    for s in &index.tx_names {
-        let mut star_split = s.split('*');
-        let gene = star_split.next().ok_or_else(|| format_err!("no split: {}", s))?;
-        let c = gene_tx_counts.entry(gene).or_insert_with(Vec::new);
-        c.push(s.as_str());
-    }
-    debug!("{} out of {} equivalence classes correspond to a single gene", single_gene_eq_classes.len(), index.eq_classes.len());
-    
-    for (gene, eqs) in genes_to_eq_classes.iter() {
-        let txs = &gene_tx_counts[gene];
-        info!("Computing EM for gene {} with {} gene-specific equivalence classes and {} transcripts",gene,eqs.len(),txs.len());
-        /*let eq_class_counts = eq_counts.eq_class_counts(index.tx_names.len());
-        let weights = squarem(&eq_class_counts);
-        let mut weight_names: Vec<(f64, &String, usize)> = 
-                weights.
-                into_iter().
-                enumerate().
-                map(|(i,w)| (w, &index.tx_names[i], i)).
-                collect();
-            weight_names.sort_by(|(wa,_, _), (wb, _, _)| (-wa).partial_cmp(&-wb).unwrap());
-        for (w, name, _) in &weight_names {
-            if *w > 1e-2 {
-                println!("{}\t{}", name, w);
+    for (gene, weights) in &weight_names.iter().group_by(|x| (x.3)) {
+        info!("Evaluating weights for gene {}",gene);
+        let mut weights_written = 0;
+        let weights : Vec<_> = weights.collect();
+        for (_,w,n,_,exp) in &weights {
+            if *exp > 100 {
+                writeln!(weights_file, "{}\t{}\t{}", n, w, f64::from(*exp as u32) / f64::from(eq_class_counts.nreads))?;
+                weights_written += 1;
+                if weights_written == 5 {break;}
             } else {break;}
-        }*/
-        
-        if let Some((eqclass_counts, tx_order, reads_explained)) = eq_counts.eq_class_counts_from_vec(eqs, &index.eq_classes) {
-            
-            /*for (cls, n) in eqclass_counts.counts_reads.iter() {
-                for i in cls { print!("{} ", &index.tx_names[tx_order[*i as usize] as usize]); }
-                println!("{}",n);
+        }
+        if weights_written == 0 {
+            continue;
+        }
+        let mut pairs : Vec<(&String,&String,f64)> = Vec::new();
+        'outer: for i in 0..weights_written-1 {
+            for j in i+1..weights_written {
+                let exp = eq_class_counts.pair_reads_explained(weights[i].0, weights[j].0);
+                if exp > 100 {
+                    pairs.push((weights[i].2, weights[j].2, f64::from(exp) / f64::from(eq_class_counts.nreads)));
+                } else {break 'outer;}
             }
-            println!("");
-            for (cls, n) in eqclass_counts.counts.iter() {
-                for i in cls { print!("{} ", &index.tx_names[tx_order[*i as usize] as usize]); }
-                println!("{}",n);
-            }*/
-            
-            let weights = squarem(&eqclass_counts);
-            debug!("Calculated weights for {} transcripts",weights.len());
-
-            let mut weight_names: Vec<(f64, &String, usize, u32)> = 
-                weights.
-                into_iter().
-                enumerate().
-                map(|(i,w)| (w, &index.tx_names[tx_order[i] as usize], reads_explained[i], i as u32)).
-                collect();
-            weight_names.sort_by(|(wa,_, _,_), (wb, _, _,_)| (-wa).partial_cmp(&-wb).unwrap());
-        
-            let mut weights_written = 0;
-            for (w, name, exp, _) in &weight_names {
-                if *w > 1e-2 {
-                    weights_written += 1;
-                    writeln!(weights_file, "{}\t{}\t{}", name, w, f64::from(*exp as u32) / f64::from(eqclass_counts.nreads))?;
-                } else {
-                    break;
-                }
-            }
-            
-            let mut pairs : Vec<(&String,&String,f64)> = Vec::new();
-            
-            for i in 0..weights_written-1 {
-                for j in i+1..weights_written {
-                    let exp = eqclass_counts.pair_reads_explained(weight_names[i].3, weight_names[j].3);
-                    pairs.push((weight_names[i].1, weight_names[j].1,f64::from(exp) / f64::from(eqclass_counts.nreads)));
-                }
-            }
+        }
+        if !pairs.is_empty() {
             pairs.sort_by(|(_,_,wa), (_,_,wb)| (-wa).partial_cmp(&-wb).unwrap());
             for i in 0..std::cmp::min(5,pairs.len()) {
                 writeln!(pairs_file, "{}\t{}\t{}", pairs[i].0, pairs[i].1, pairs[i].2 )?;
             }
-            // Write the sequences
-            if !pairs.is_empty() {
-                alleles_called.insert(pairs[0].0.clone());
-                alleles_called.insert(pairs[0].1.clone());
-            } else if !weight_names.is_empty() {
-                alleles_called.insert(weight_names[0].1.clone());
-            }
+            alleles_called.insert(pairs[0].0.clone());
+            alleles_called.insert(pairs[0].1.clone());
+        } else if !weight_names.is_empty() {
+            alleles_called.insert(weights[0].2.clone());
         }
     }
+    
     info!("Writing CDS of {} alleles to file", alleles_called.len());
     use bio::io::fasta;
     let mut gen_file = fasta::Writer::to_file("gen_pseudoaln.fasta")?;
@@ -455,7 +404,7 @@ pub fn hla_em(hla_index: String, hla_counts: String, cds_db: String, gen_db: Str
         let allele_str = record.desc().ok_or_else(|| format_err!("no HLA allele"))?;
         let allele_str = allele_str.split(' ').next().ok_or_else(||format_err!("no HLA allele"))?;
         if alleles_called.contains(allele_str) {
-            println!("Writing CDS of {}",allele_str);
+            info!("Writing CDS of {}",allele_str);
             cds_file.write_record(&record)?;
         }
     }
@@ -466,7 +415,7 @@ pub fn hla_em(hla_index: String, hla_counts: String, cds_db: String, gen_db: Str
         let allele_str = record.desc().ok_or_else(|| format_err!("no HLA allele"))?;
         let allele_str = allele_str.split(' ').next().ok_or_else(||format_err!("no HLA allele"))?;
         if alleles_called.contains(allele_str) {
-            println!("Writing genomic sequence of {}",allele_str);
+            info!("Writing genomic sequence of {}",allele_str);
             gen_file.write_record(&record)?;
         }
     }
@@ -493,7 +442,7 @@ mod test_em {
         counts.insert(eqC, 10);
         counts.insert(eqD, 10);
         
-        EqClassCounts { counts, nitems: 4, counts_reads: HashMap::new(), nreads: 0 }
+        EqClassCounts { counts_umi : counts, counts_reads : HashMap::new(), nitems: 4, nreads: 0 }
     }
 
 
@@ -514,7 +463,7 @@ mod test_em {
         counts.insert(eqD, 10);
         counts.insert(eqE, 20);
         
-        EqClassCounts { counts, nitems: 6, counts_reads: HashMap::new(), nreads: 0 }
+        EqClassCounts { counts_umi : counts, counts_reads : HashMap::new(), nitems: 6, nreads: 0 }
     }
 
 
